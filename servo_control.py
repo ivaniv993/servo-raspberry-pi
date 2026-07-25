@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-SG90 keyboard control for Raspberry Pi 5 (lgpio backend).
-Left/Right arrows: -10/+10 degrees. Q or Ctrl+C: exit.
+Dual SG90 keyboard control for Raspberry Pi 5 (lgpio backend).
+Left/Right arrows: pan servo -10/+10 degrees.
+Up/Down arrows:    tilt servo +10/-10 degrees.
+Q or Ctrl+C: exit.
 
 Install: sudo apt install python3-lgpio
-Signal pin: GPIO18 (physical pin 12)
+
+Wiring (BCM numbering):
+  Pan servo  (left/right) signal -> GPIO18, physical pin 12
+  Tilt servo (up/down)    signal -> GPIO13, physical pin 33
+  Both servo grounds      -> Pi GND (e.g. physical pin 6) AND external supply GND (common ground)
+  Both servo power (red)  -> external 5-6V supply (+), NOT the Pi's 5V pin
+
 Log file: servo.log (also printed to console)
 """
 
@@ -15,7 +23,8 @@ import select
 import logging
 import lgpio
 
-SERVO_PIN = 18
+PAN_PIN = 18    # left/right, physical pin 12
+TILT_PIN = 13   # up/down,    physical pin 33
 FREQ = 50
 STEP = 10
 ANGLE_MIN = 0
@@ -55,55 +64,32 @@ def read_key(timeout=0.1):
     return {'[C': 'RIGHT', '[D': 'LEFT', '[A': 'UP', '[B': 'DOWN'}.get(seq)
 
 
+def set_angle(h, pin, angle):
+    """Apply an angle to a servo and return its duty cycle."""
+    duty = angle_to_duty(angle)
+    lgpio.tx_pwm(h, pin, FREQ, duty)
+    return duty
+
+
 def main():
     h = lgpio.gpiochip_open(0)
-    lgpio.gpio_claim_output(h, SERVO_PIN)
+    lgpio.gpio_claim_output(h, PAN_PIN)
+    lgpio.gpio_claim_output(h, TILT_PIN)
 
-    angle = 90
-    duty = angle_to_duty(angle)
-    lgpio.tx_pwm(h, SERVO_PIN, FREQ, duty)
+    # axis -> [pin, current angle, human name]
+    axes = {
+        'pan':  {'pin': PAN_PIN,  'angle': 90, 'name': 'PAN '},
+        'tilt': {'pin': TILT_PIN, 'angle': 90, 'name': 'TILT'},
+    }
 
-    log.info("Started. GPIO%d, %d Hz, step %d deg", SERVO_PIN, FREQ, STEP)
-    log.info("Init: angle=%d deg, pulse=%.2f ms, duty=%.2f%%",
-             angle, duty / 100.0 * 20.0, duty)
+    for ax in axes.values():
+        duty = set_angle(h, ax['pin'], ax['angle'])
+        log.info("Init: %s angle=%d deg, pulse=%.2f ms, duty=%.2f%%",
+                 ax['name'], ax['angle'], duty / 100.0 * 20.0, duty)
+
+    log.info("Started. PAN=GPIO%d TILT=GPIO%d, %d Hz, step %d deg",
+             PAN_PIN, TILT_PIN, FREQ, STEP)
+    log.info("Keys: LEFT/RIGHT = pan, UP/DOWN = tilt, Q = quit")
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        while True:
-            key = read_key()
-            if key is None:
-                continue
-            if key in ('q', 'Q', '\x03'):
-                log.info("Exit key pressed")
-                break
-            if key == 'RIGHT':
-                new = min(ANGLE_MAX, angle + STEP)
-            elif key == 'LEFT':
-                new = max(ANGLE_MIN, angle - STEP)
-            else:
-                log.debug("Ignored key: %r", key)
-                continue
-
-            if new != angle:
-                duty = angle_to_duty(new)
-                lgpio.tx_pwm(h, SERVO_PIN, FREQ, duty)
-                log.info("%-5s | %3d -> %3d deg | pulse=%.2f ms | duty=%.2f%%",
-                         key, angle, new, duty / 100.0 * 20.0, duty)
-                angle = new
-            else:
-                limit = ANGLE_MAX if key == 'RIGHT' else ANGLE_MIN
-                log.warning("%-5s | limit reached, staying at %d deg (max %d)",
-                            key, angle, limit)
-    except KeyboardInterrupt:
-        log.info("Interrupted by Ctrl+C")
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        lgpio.tx_pwm(h, SERVO_PIN, 0, 0)
-        lgpio.gpiochip_close(h)
-        log.info("PWM stopped, GPIO released. Final angle: %d deg", angle)
-
-
-if __name__ == '__main__':
-    main()
