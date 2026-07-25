@@ -93,3 +93,52 @@ def main():
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            key = read_key()
+            if key is None:
+                continue
+            if key in ('q', 'Q', '\x03'):
+                log.info("Exit key pressed")
+                break
+
+            # Map key -> (axis, direction)
+            if key == 'RIGHT':
+                axis, delta = 'pan', +STEP
+            elif key == 'LEFT':
+                axis, delta = 'pan', -STEP
+            elif key == 'UP':
+                axis, delta = 'tilt', +STEP
+            elif key == 'DOWN':
+                axis, delta = 'tilt', -STEP
+            else:
+                log.debug("Ignored key: %r", key)
+                continue
+
+            ax = axes[axis]
+            angle = ax['angle']
+            new = min(ANGLE_MAX, max(ANGLE_MIN, angle + delta))
+
+            if new != angle:
+                duty = set_angle(h, ax['pin'], new)
+                log.info("%-5s | %s %3d -> %3d deg | pulse=%.2f ms | duty=%.2f%%",
+                         key, ax['name'], angle, new, duty / 100.0 * 20.0, duty)
+                ax['angle'] = new
+            else:
+                limit = ANGLE_MAX if delta > 0 else ANGLE_MIN
+                log.warning("%-5s | %s limit reached, staying at %d deg (max %d)",
+                            key, ax['name'], angle, limit)
+    except KeyboardInterrupt:
+        log.info("Interrupted by Ctrl+C")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        lgpio.tx_pwm(h, PAN_PIN, 0, 0)
+        lgpio.tx_pwm(h, TILT_PIN, 0, 0)
+        lgpio.gpiochip_close(h)
+        log.info("PWM stopped, GPIO released. Final: pan=%d tilt=%d deg",
+                 axes['pan']['angle'], axes['tilt']['angle'])
+
+
+if __name__ == '__main__':
+    main()
