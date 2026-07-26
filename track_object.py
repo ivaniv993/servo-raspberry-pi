@@ -86,6 +86,8 @@ class ServoController:
         self.dry_run = dry_run or not LGPIO_AVAILABLE
         self.pan_angle = ANGLE_CENTER
         self.tilt_angle = ANGLE_CENTER
+        self.pan_limited = False   # True when the last pan command hit a servo limit
+        self.tilt_limited = False  # True when the last tilt command hit a servo limit
         self.h = None
 
         if self.dry_run:
@@ -96,10 +98,20 @@ class ServoController:
             self.h = lgpio.gpiochip_open(0)
             lgpio.gpio_claim_output(self.h, PAN_PIN)
             lgpio.gpio_claim_output(self.h, TILT_PIN)
-            self._apply(PAN_PIN, self.pan_angle)
-            self._apply(TILT_PIN, self.tilt_angle)
-            log.info("Servos initialized: pan=GPIO%d tilt=GPIO%d, centered at %d deg",
-                     PAN_PIN, TILT_PIN, ANGLE_CENTER)
+            log.info("Servos initialized: pan=GPIO%d tilt=GPIO%d", PAN_PIN, TILT_PIN)
+
+    def center(self, settle_time=0.6):
+        """Explicitly move both servos to the neutral (mid-travel) position.
+
+        Must be called before tracking starts so the rig always begins from a
+        known, centered pose (90 deg for a 0-180 deg servo).
+        """
+        self.set_pan(ANGLE_CENTER)
+        self.set_tilt(ANGLE_CENTER)
+        log.info("Servos moved to neutral position: pan=%d tilt=%d (limits: %d-%d deg)",
+                 self.pan_angle, self.tilt_angle, ANGLE_MIN, ANGLE_MAX)
+        if not self.dry_run:
+            time.sleep(settle_time)  # give the servos time to physically reach center
 
     def _apply(self, pin, angle):
         if self.dry_run:
@@ -107,12 +119,28 @@ class ServoController:
         lgpio.tx_pwm(self.h, pin, FREQ, angle_to_duty(angle))
 
     def set_pan(self, angle):
-        self.pan_angle = max(ANGLE_MIN, min(ANGLE_MAX, angle))
+        """Move the pan servo toward `angle`, clamped to the servo's limits.
+
+        Returns True if the requested angle was outside [ANGLE_MIN, ANGLE_MAX]
+        and had to be clamped (i.e. the physical limit was reached).
+        """
+        clamped = max(ANGLE_MIN, min(ANGLE_MAX, angle))
+        self.pan_limited = clamped != angle
+        self.pan_angle = clamped
         self._apply(PAN_PIN, self.pan_angle)
+        return self.pan_limited
 
     def set_tilt(self, angle):
-        self.tilt_angle = max(ANGLE_MIN, min(ANGLE_MAX, angle))
+        """Move the tilt servo toward `angle`, clamped to the servo's limits.
+
+        Returns True if the requested angle was outside [ANGLE_MIN, ANGLE_MAX]
+        and had to be clamped (i.e. the physical limit was reached).
+        """
+        clamped = max(ANGLE_MIN, min(ANGLE_MAX, angle))
+        self.tilt_limited = clamped != angle
+        self.tilt_angle = clamped
         self._apply(TILT_PIN, self.tilt_angle)
+        return self.tilt_limited
 
     def close(self):
         if self.dry_run:
@@ -139,9 +167,12 @@ def parse_args():
 
     p.add_argument("--target-class", default="", help="only track detections of this class name; "
                                                         "empty = consider all classes")
-    p.add_argument("--select", choices=["conf", "area"], default="conf",
+    p.add_argument("--select", choices=["conf", "area"], default="area",
                    help="when multiple detections qualify, pick the one with highest "
-                        "confidence (conf) or largest box area (area)")
+                        "confidence (conf), or the one with the largest box area (area). "
+                        "'area' is used as a proxy for the nearest object (bigger box = "
+                        "closer to the camera) and is the default so the rig centers on "
+                        "the nearest detected object")
 
     p.add_argument("--kp-pan", type=float, default=15.0,
                    help="proportional gain in degrees/frame at full normalized offset (pan)")
@@ -176,7 +207,12 @@ def open_capture(source, width, height):
 
 
 def pick_target(boxes, names, target_class, select):
-    """Return the single best-matching detection box, or None."""
+    """Return the single best-matching detection box, or None.
+
+    select="area" picks the detection with the largest bounding-box area,
+    which is used as a proxy for the *nearest* object to the camera (a
+    closer object occupies more of the frame).
+    """
     candidates = []
     for box in boxes:
         cls_name = names[int(box.cls[0])]
@@ -237,6 +273,10 @@ def main():
         writer = cv2.VideoWriter(args.save, cv2.VideoWriter_fourcc(*"mp4v"), fps_out, (w, h))
 
     servo = ServoController(dry_run=args.dry_run)
+    # Step 1: always start tracking from a known neutral pose (90 deg on each
+    # 0-180 deg servo) before any tracking correction is applied.
+    servo.center()
+
     pan_dir = -1.0 if args.invert_pan else 1.0
     tilt_dir = -1.0 if args.invert_tilt else 1.0
 
@@ -268,6 +308,9 @@ def main():
             cv2.drawMarker(annotated, (w // 2, h // 2), (255, 0, 0),
                             cv2.MARKER_CROSS, 24, 2)
 
+            # Step 2: of all qualifying detections, pick the nearest one
+            # (largest box area by default) and rotate the servos so the
+            # camera center moves toward it.
             box = pick_target(r.boxes, names, args.target_class, args.select)
 
             if box is not None:
@@ -276,10 +319,19 @@ def main():
                 conf = float(box.conf[0])
                 cx, cy, dx_px, dy_px, dx_n, dy_n = compute_offset(box, w, h)
 
+                pan_limited = False
+                tilt_limited = False
                 if abs(dx_n) > args.deadzone:
-                    servo.set_pan(servo.pan_angle + pan_dir * args.kp_pan * dx_n)
+                    pan_limited = servo.set_pan(servo.pan_angle + pan_dir * args.kp_pan * dx_n)
                 if abs(dy_n) > args.deadzone:
-                    servo.set_tilt(servo.tilt_angle + tilt_dir * args.kp_tilt * dy_n)
+                    tilt_limited = servo.set_tilt(servo.tilt_angle + tilt_dir * args.kp_tilt * dy_n)
+
+                if pan_limited or tilt_limited:
+                    log.warning(
+                        "Servo limit reached (0-%d deg): pan_limited=%s tilt_limited=%s "
+                        "-> pan=%d tilt=%d",
+                        ANGLE_MAX, pan_limited, tilt_limited, servo.pan_angle, servo.tilt_angle,
+                    )
 
                 cv2.circle(annotated, (int(cx), int(cy)), 6, (0, 0, 255), -1)
                 cv2.line(annotated, (w // 2, h // 2), (int(cx), int(cy)), (0, 0, 255), 2)
@@ -304,6 +356,18 @@ def main():
                 annotated, f"{fps:.1f} FPS | pan={servo.pan_angle} tilt={servo.tilt_angle}",
                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
             )
+
+            # On-screen warning whenever a servo has hit its rotation limit
+            if servo.pan_limited or servo.tilt_limited:
+                axes = []
+                if servo.pan_limited:
+                    axes.append("PAN")
+                if servo.tilt_limited:
+                    axes.append("TILT")
+                limit_msg = f"SERVO LIMIT REACHED ({'/'.join(axes)}) - can't rotate further"
+                cv2.putText(
+                    annotated, limit_msg, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2,
+                )
 
             if writer is not None:
                 writer.write(annotated)
