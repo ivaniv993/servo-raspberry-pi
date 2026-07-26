@@ -23,11 +23,22 @@ VENV_DIR="$HOME/envs/track"
 
 echo "== 1/4: Updating apt and installing system dependencies =="
 sudo apt update
-sudo apt install -y \
-    python3-venv python3-pip python3-dev \
-    python3-lgpio \
-    libatlas-base-dev libopenjp2-7 libopenblas-dev \
+
+# Installed one-by-one (not all in one `apt install`) so that a single
+# package being renamed/removed in your OS version (e.g. libatlas-base-dev
+# was dropped from newer Debian/Raspberry Pi OS repos) doesn't abort the
+# whole setup. Any package that fails to install just prints a warning.
+SYSTEM_PACKAGES=(
+    python3-venv python3-pip python3-dev
+    python3-lgpio
+    libopenjp2-7 libopenblas-dev
     ffmpeg libgl1 libgtk-3-0
+)
+for pkg in "${SYSTEM_PACKAGES[@]}"; do
+    if ! sudo apt install -y "$pkg"; then
+        echo "WARNING: failed to install '$pkg' (may not exist on your OS version) - continuing"
+    fi
+done
 
 echo "== 2/4: Creating persistent virtual environment at $VENV_DIR =="
 # --system-site-packages lets the venv reuse apt's python3-lgpio (GPIO access
