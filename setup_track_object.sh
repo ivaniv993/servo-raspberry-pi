@@ -50,9 +50,16 @@ else
 fi
 
 echo "== 3/4: Installing Python packages into the venv =="
+# pip's default temp/build dir is /tmp, which on Raspberry Pi OS is a small
+# RAM-backed tmpfs (often ~1GB). ultralytics pulls in PyTorch, whose wheel is
+# big enough to fill that up and fail with "No space left on device" even
+# though the actual SD card has plenty of room. Point TMPDIR at real disk.
+export TMPDIR="$HOME/.cache/pip-tmp"
+mkdir -p "$TMPDIR"
+
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
-pip install ultralytics opencv-python
+pip install --no-cache-dir ultralytics opencv-python
 
 echo "== 4/4: Verifying =="
 python -c "import cv2, lgpio; from ultralytics import YOLO; print('OK: opencv', cv2.__version__, '| lgpio and ultralytics import fine')"
