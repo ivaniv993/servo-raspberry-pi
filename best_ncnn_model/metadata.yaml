@@ -1,0 +1,23 @@
+description: Ultralytics YOLO11s model trained on /content/data/merged/data.yaml
+author: Ultralytics
+date: '2026-07-25T13:28:38.840389+03:00'
+version: 8.4.105
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 480
+- 480
+names:
+  0: drone
+  1: bird
+  2: helicopter
+  3: plane
+args:
+  batch: 1
+  quantize: null
+channels: 3
+end2end: false
